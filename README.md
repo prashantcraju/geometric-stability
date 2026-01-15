@@ -1,6 +1,7 @@
 # Geometric Stability: The Missing Axis of Representations
 <p align="center">
     <a style="text-decoration:none !important;" href="https://arxiv.org/abs/2601.09173" alt="arXiv"><img src="https://img.shields.io/badge/paper-arXiv-blue" /></a>
+    <a style="text-decoration:none !important;" href="https://huggingface.co/papers/2601.09173" alt="Hugging Face Papers"><img src="https://img.shields.io/badge/paper-Hugging%20Face-FFD21E?logo=huggingface&logoColor=black" /></a>
 </p>
 
 
