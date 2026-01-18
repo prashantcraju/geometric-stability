@@ -1,4 +1,9 @@
 # Geometric Stability: The Missing Axis of Representations
+<p align="center">
+    <a style="text-decoration:none !important;" href="https://arxiv.org/abs/2601.09173" alt="arXiv"><img src="https://img.shields.io/badge/paper-arXiv-blue" /></a>
+    <a style="text-decoration:none !important;" href="https://huggingface.co/papers/2601.09173" alt="Hugging Face Papers"><img src="https://img.shields.io/badge/paper-Hugging%20Face-FFD21E?logo=huggingface&logoColor=black" /></a>
+</p>
+
 
 ## Overview
 
@@ -77,42 +82,3 @@ python distinction_ground_truth.py
 ```
 
 Results are saved to local output directories within each folder.
-
-## 🚀 Quick Start (For Practitioners)
-
-**Looking to use Geometric Stability (Shesha) in your own research or production models?**
-
-You do not need to clone this repository. We maintain a production-ready, optimized Python library for that:
-
-| **Repository** | **Purpose** | **Link** |
-| :--- | :--- | :--- |
-| **`shesha` (Recommended)** | 📦 **The Library.** Use this to measure stability in your own models (LLMs, Bio, Vision). | [**View on GitHub**](https://github.com/prashantcraju/shesha) |
-| `geometric-stability` | 📄 **The Paper.** Use this only to reproduce the specific figures/experiments from our arXiv paper. | *You are here* |
-
-### Installation
-```bash
-pip install shesha-geometry
-```
-
-### Citation
-
-If you use `shesha-geometry`, please cite:
-```bibtex
-@software{shesha2026,
-  title = {Shesha: Self-consistency Metrics for Representational Stability},
-  author = {Raju, Prashant C.},
-  year = {2026},
-  publisher = {Zenodo},
-  doi = {10.5281/zenodo.18227453},
-  url = {https://doi.org/10.5281/zenodo.18227453},
-  copyright = {MIT License}
-}
-
-@article{raju2026geometric,
-  title={Geometric Stability: The Missing Axis of Representations},
-  author={Raju, Prashant C.},
-  journal={arXiv preprint arXiv:2601.09173},
-  year={2026}
-}
-```
-
