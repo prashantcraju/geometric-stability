@@ -62,14 +62,14 @@ wget https://raw.githubusercontent.com/thuml/LogME/main/LogME.py
 ## Experiments
 | Folder | Description | Paper Section | Notes |
 |--------|-------------|---------------| ---------------|
-| `metric_validation/` | Shesha metric validation on embeddings | Appendix B | must run `shesha_validation_embeddings.py` before running `shesha_validation.py`|
-| `distinction/` | Ground truth validation and metric dissociation | Section 2, Appendix C | |
-| `steering/` | Representation steering (synthetic and real tasks) | Section 3.1 | |
-| `vision_architecture/` | Vision model architecture comparisons | Section 3.2 | requires LogME (see Additional Dependencies)|
-| `drift/` | Representational drift in language models | Section 3.3 | requires Hugging Face token (see Hugging Face Configuration)|
-| `crispr/` | CRISPR perturbation coherence analysis | Section 3.4 | |
-| `transfer_learning/` | Transfer learning benchmarks | Appendix G | requires LogME (see Additional Dependencies)|
-| `neuroscience/` | Neural population stability analysis | Appendix I | |
+| `metric_validation/` | Shesha metric validation on embeddings | Appendix 6 | must run `shesha_validation_embeddings.py` before running `shesha_validation.py`|
+| `distinction/` | Ground truth validation and metric dissociation | Section 2, Appendix 7 | |
+| `steering/` | Representation steering (synthetic and real tasks) | Section 3.1, Appendix 8 | |
+| `vision_architecture/` | Vision model architecture comparisons | Section 3.2, Appendix 9 | requires LogME (see Additional Dependencies)|
+| `drift/` | Representational drift in language models | Section 3.3, Appendix 10 | requires Hugging Face token (see Hugging Face Configuration)|
+| `transfer_learning/` | Transfer learning benchmarks | Appendix 11 | requires LogME (see Additional Dependencies)|
+| `crispr/` | CRISPR perturbation coherence analysis | Section 3.4, Appendix 12 | |
+| `neuroscience/` | Neural population stability analysis | Section 3.5, Appendix 13 | |
 
 
 
@@ -112,9 +112,9 @@ If you use `shesha-geometry`, please cite:
 }
 
 @article{raju2026geometric,
-  title={Geometric Stability: The Missing Axis of Representations},
-  author={Raju, Prashant C.},
-  journal={arXiv preprint arXiv:2601.09173},
-  year={2026}
+  title = {Geometric Stability: The Missing Axis of Representations},
+  author = {Raju, Prashant C.},
+  journal = {arXiv preprint arXiv:2601.09173},
+  year = {2026}
 }
 ```
