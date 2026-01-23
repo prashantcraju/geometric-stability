@@ -102,7 +102,7 @@ pip install shesha-geometry
 If you use `shesha-geometry`, please cite:
 ```bibtex
 @software{shesha2026,
-  title = {Shesha: Self-consistency Metrics for Representational Stability},
+  title = {Shesha: Self-Consistency Metrics for Representational Stability},
   author = {Raju, Prashant C.},
   year = {2026},
   publisher = {Zenodo},
@@ -112,9 +112,9 @@ If you use `shesha-geometry`, please cite:
 }
 
 @article{raju2026geometric,
-  title={Geometric Stability: The Missing Axis of Representations},
-  author={Raju, Prashant C.},
-  journal={arXiv preprint arXiv:2601.09173},
-  year={2026}
+  title = {Geometric Stability: The Missing Axis of Representations},
+  author = {Raju, Prashant C.},
+  journal = {arXiv preprint arXiv:2601.09173},
+  year = {2026}
 }
 ```
