@@ -140,3 +140,7 @@ If you use `shesha-geometry`, please cite:
   year = {2026}
 }
 ```
+
+## License
+
+This repository is released under the [MIT License](LICENSE).
