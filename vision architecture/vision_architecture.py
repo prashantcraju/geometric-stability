@@ -1,6 +1,7 @@
 """
 Shesha Vision Architecture Experiment
 """
+import gc
 import os
 import hashlib
 import torch
@@ -19,12 +20,20 @@ from torchvision import datasets, transforms
 from pathlib import Path
 from LogME import LogME
 
+
 # =============================================================================
 # 0) CONFIGURATION
 # =============================================================================
 SEEDS = [320, 1991, 9]
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 EPS = 1e-8
+# Start high and let OOM backoff (down to 8) find the limit per model.
+DEFAULT_BATCH_SIZE = 2048
+
+# Models excluded from benchmarking (persistent OOM / unusable for this paper).
+EXCLUDED_MODELS = {
+    'vitamin_base_224.datacomp1b_clip',
+}
 
 # Valid source label spaces for LEEP
 VALID_LEEP_SOURCE_CLASSES = {1000, 21841, 21843, 11821, 11221, 10450, 12000}
@@ -57,9 +66,33 @@ DATASET_CONFIG = {
     },
 }
 
+# ---------------------------------------------------------------------------
 # Output directory
-OUTPUT_DIR = Path("./shesha-vision_architecture")
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+# ---------------------------------------------------------------------------
+GDRIVE_FOLDER = None
+DEFAULT_OUTPUT_DIR = "./shesha-vision_architecture"
+
+
+def _resolve_output_dir(gdrive_folder=GDRIVE_FOLDER) -> Path:
+    """Return output Path: optional override if writable, else local default."""
+    if gdrive_folder:
+        gdrive_path = Path(gdrive_folder)
+        try:
+            gdrive_path.mkdir(parents=True, exist_ok=True)
+            test_file = gdrive_path / ".write_test"
+            test_file.touch()
+            test_file.unlink()
+            print(f"[Output] Saving to: {gdrive_path}")
+            return gdrive_path
+        except Exception:
+            pass
+    local_path = Path(DEFAULT_OUTPUT_DIR)
+    local_path.mkdir(parents=True, exist_ok=True)
+    print(f"[Output] Saving locally: {local_path.resolve()}")
+    return local_path
+
+
+OUTPUT_DIR = _resolve_output_dir()
 
 # =============================================================================
 # 1) DETERMINISM UTILITIES
@@ -233,15 +266,156 @@ def get_raw_dataset(dataset_name):
 # =============================================================================
 
 def get_strategic_model_list():
-    """Get curated list of 94 pretrained models."""
-    foundation = [
-        'vit_small_patch14_dinov2.lvd142m', 'vit_base_patch14_dinov2.lvd142m',
-        'vit_large_patch14_dinov2.lvd142m', 'vit_giant_patch14_dinov2.lvd142m',
-        'vit_base_patch32_clip_224.openai', 'vit_base_patch16_clip_224.openai',
-        'vit_large_patch14_clip_224.openai', 'vit_base_patch16_224.mae',
-        'eva02_base_patch14_224.mim_in22k', 'eva02_large_patch14_224.mim_in22k',
-        'vit_base_patch16_224.dino', 'beit_base_patch16_224.in22k_ft_in22k',
+    """Get curated list of pretrained models including expanded CLIP variants."""
+    clip_models = [
+        # OpenAI CLIP backbones
+        'vit_base_patch32_clip_224.openai',
+        'vit_base_patch16_clip_224.openai',
+        'vit_large_patch14_clip_224.openai',
+        # LAION-400M CLIP
+        'vit_base_patch32_clip_224.laion400m_e32',
+        'vit_base_patch16_clip_224.laion400m_e32',
+        'vit_large_patch14_clip_224.laion400m_e32',
+        # LAION-2B CLIP (pure pretrain checkpoints, no fine-tuning)
+        'vit_base_patch32_clip_224.laion2b',
+        'vit_base_patch16_clip_224.laion2b',
+        'vit_large_patch14_clip_224.laion2b',
+        'vit_huge_patch14_clip_224.laion2b',
+        'vit_giant_patch14_clip_224.laion2b',
+        # DataComp CLIP
+        'vit_base_patch32_clip_224.datacompxl',
+        'vit_base_patch16_clip_224.datacompxl',
+        'vit_large_patch14_clip_224.datacompxl',
+        # EVA-CLIP (LAION-2B)
+        'eva02_enormous_patch14_clip_224.laion2b',
+        'eva02_enormous_patch14_clip_224.laion2b_plus',
+        # ConvNeXt CLIP (LAION-2B)
+        'convnext_base.clip_laion2b',
+        'convnext_large_mlp.clip_laion2b_augreg',
+        'convnext_xxlarge.clip_laion2b_rewind',
     ]
+
+    # DINOv2 — original + register variants (improved patch artifacts)
+    dinov2 = [
+        'vit_small_patch14_dinov2.lvd142m',
+        'vit_small_patch14_reg4_dinov2.lvd142m',
+        'vit_base_patch14_dinov2.lvd142m',
+        'vit_base_patch14_reg4_dinov2.lvd142m',
+        'vit_large_patch14_dinov2.lvd142m',
+        'vit_large_patch14_reg4_dinov2.lvd142m',
+        'vit_giant_patch14_dinov2.lvd142m',
+        'vit_giant_patch14_reg4_dinov2.lvd142m',
+    ]
+
+    # DINOv3 — Meta's next-gen self-supervised (LVD-1689M)
+    dinov3 = [
+        'vit_small_patch16_dinov3.lvd1689m',
+        'vit_base_patch16_dinov3.lvd1689m',
+        'vit_large_patch16_dinov3.lvd1689m',
+        'vit_small_patch16_dinov3_qkvb.lvd1689m',
+        'vit_base_patch16_dinov3_qkvb.lvd1689m',
+        'vit_large_patch16_dinov3_qkvb.lvd1689m',
+    ]
+
+    # SigLIP — Google sigmoid-loss CLIP, strong zero-shot (224px only)
+    siglip = [
+        'vit_base_patch16_siglip_224.webli',
+        'vit_large_patch16_siglip_256.webli',
+        'vit_so400m_patch14_siglip_224.webli',
+        'vit_base_patch16_siglip_224.v2_webli',
+        'vit_large_patch16_siglip_256.v2_webli',
+        'vit_so400m_patch14_siglip_224.v2_webli',
+    ]
+
+    # BEiT / BEiTv2 / BEiT3 — masked image modelling family
+    beit_family = [
+        'beit_base_patch16_224.in22k_ft_in22k',
+        'beit_large_patch16_224.in22k_ft_in22k',
+        'beitv2_base_patch16_224.in1k_ft_in22k',
+        'beitv2_large_patch16_224.in1k_ft_in22k',
+        'beit3_base_patch16_224.in22k_ft_in1k',
+        'beit3_large_patch16_224.in22k_ft_in1k',
+    ]
+
+    # MAE — ViT + Hiera variants (masked autoencoder)
+    mae_family = [
+        'vit_base_patch16_224.mae',
+        'vit_large_patch16_224.mae',
+        'vit_huge_patch14_224.mae',
+        'hiera_tiny_224.mae',
+        'hiera_small_224.mae',
+        'hiera_base_224.mae',
+        'hiera_large_224.mae',
+        'hiera_huge_224.mae',
+    ]
+
+    # EVA / EVA-02 — Florence-style hybrid CLIP+MIM pretraining
+    eva_family = [
+        'eva02_tiny_patch14_224.mim_in22k',
+        'eva02_small_patch14_224.mim_in22k',
+        'eva02_base_patch14_224.mim_in22k',
+        'eva02_large_patch14_224.mim_in22k',
+        'eva02_large_patch14_224.mim_m38m',
+        'eva_large_patch14_196.in22k_ft_in1k',
+        'eva_giant_patch14_336.m30m_ft_in22k_in1k',
+    ]
+
+    # SAM ViT — segment-anything pretraining (SA-1B)
+    sam_vit = [
+        'samvit_base_patch16.sa1b',
+        'samvit_large_patch16.sa1b',
+        'samvit_huge_patch16.sa1b',
+        'vit_base_patch16_224.sam_in1k',
+    ]
+
+    # I-JEPA — joint-embedding predictive architecture (IN22k/IN1k)
+    ijepa = [
+        'vit_huge_patch14_gap_224.in1k_ijepa',
+        'vit_huge_patch14_gap_224.in22k_ijepa',
+        'vit_giant_patch16_gap_224.in22k_ijepa',
+    ]
+
+    # SwinV2 22k pretrained
+    swinv2_22k = [
+        'swinv2_base_window12_192.ms_in22k',
+        'swinv2_large_window12_192.ms_in22k',
+        'swinv2_base_window12to16_192to256.ms_in22k_ft_in1k',
+        'swinv2_large_window12to16_192to256.ms_in22k_ft_in1k',
+    ]
+
+    # ViTamin — efficient CLIP with MBConv mixer
+    vitamin = [
+        'vitamin_small_224.datacomp1b_clip',
+        'vitamin_base_224.datacomp1b_clip',
+        'vitamin_large_224.datacomp1b_clip',
+        'vitamin_large2_224.datacomp1b_clip',
+        'vitamin_xlarge_256.datacomp1b_clip',
+    ]
+
+    # DINO v1 + ResMLP-DINO
+    dino_v1 = [
+        'vit_small_patch16_224.dino',
+        'vit_base_patch16_224.dino',
+        'vit_small_patch8_224.dino',
+        'vit_base_patch8_224.dino',
+        'resmlp_12_224.fb_dino',
+        'resmlp_24_224.fb_dino',
+    ]
+
+    # Large RegNetY (SEER / SWAG self-supervised)
+    regnety_large = [
+        'regnety_160.swag_ft_in1k',
+        'regnety_320.swag_ft_in1k',
+        'regnety_1280.swag_ft_in1k',
+        'regnety_160.deit_in1k',
+        'regnety_320.seer_ft_in1k',
+        'regnety_1280.seer_ft_in1k',
+    ]
+
+    foundation = (
+        dinov2 + dinov3 + siglip + beit_family + mae_family +
+        eva_family + sam_vit + ijepa + swinv2_22k + vitamin + dino_v1 + regnety_large
+    )
 
     transformers = [
         'swin_tiny_patch4_window7_224.ms_in1k', 'swin_small_patch4_window7_224.ms_in1k',
@@ -262,7 +436,7 @@ def get_strategic_model_list():
         'convnext_tiny.fb_in1k', 'convnext_small.fb_in1k', 'convnext_base.fb_in1k', 'convnext_large.fb_in1k',
         'convnextv2_atto.fcmae_ft_in1k', 'convnextv2_nano.fcmae_ft_in1k',
         'convnextv2_tiny.fcmae_ft_in1k', 'convnextv2_base.fcmae_ft_in1k',
-        'efficientnet_b0.ra_in1k', 'efficientnet_b1.ra_in1k', 'efficientnet_b2.ra_in1k', 'efficientnet_b3.ra_in1k',
+        'efficientnet_b0.ra_in1k', 'efficientnet_b1.ft_in1k', 'efficientnet_b2.ra_in1k', 'efficientnet_b3.ra2_in1k',
         'efficientnetv2_rw_s.ra2_in1k', 'efficientnetv2_rw_m.agc_in1k',
         'tf_efficientnetv2_s.in1k', 'tf_efficientnetv2_m.in1k', 'tf_efficientnetv2_b0.in1k', 'tf_efficientnetv2_b3.in1k',
         'regnety_002.pycls_in1k', 'regnety_004.pycls_in1k', 'regnety_008.pycls_in1k',
@@ -284,12 +458,31 @@ def get_strategic_model_list():
     ]
 
     all_timm = timm.list_models(pretrained=True)
-    combined = foundation + transformers + cnns + robust
+    combined = clip_models + foundation + transformers + cnns + robust
+
+    # Deduplicate while preserving order (clip_models first)
+    seen = set()
+    combined = [m for m in combined if not (m in seen or seen.add(m))]
 
     if len(combined) < 90:
         combined += [m for m in all_timm if 'mobilenetv3' in m or 'densenet' in m][:30]
+        seen2 = set()
+        combined = [m for m in combined if not (m in seen2 or seen2.add(m))]
 
-    return [m for m in combined if m in all_timm]
+    all_timm_set = set(all_timm)
+    available   = [m for m in combined if m in all_timm_set and m not in EXCLUDED_MODELS]
+    unavailable = [m for m in combined if m not in all_timm_set]
+    excluded    = [m for m in combined if m in EXCLUDED_MODELS]
+    if unavailable:
+        print(f"[ModelList] {len(unavailable)} models not found in this timm version and will be skipped:")
+        for m in unavailable:
+            print(f"  - {m}")
+    if excluded:
+        print(f"[ModelList] {len(excluded)} models excluded for this paper:")
+        for m in excluded:
+            print(f"  - {m}")
+    print(f"[ModelList] Final count: {len(available)} models")
+    return available
 
 
 def get_pooled_features(feats):
@@ -356,6 +549,97 @@ def get_robust_logits(out):
     return logits, 'ok'
 
 
+class CudaOomExhaustedError(RuntimeError):
+    """Inference OOM persisted after batch-size backoff."""
+
+
+def _is_cuda_oom(exc):
+    if isinstance(exc, CudaOomExhaustedError):
+        return True
+    if not isinstance(exc, RuntimeError):
+        return False
+    msg = str(exc).lower()
+    return "out of memory" in msg or "cuda out of memory" in msg
+
+
+def _release_cuda_memory():
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def _build_benchmark_dataloader(full_ds, subset_idx, batch_size, num_workers, seed):
+    loader_kwargs = dict(
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=(DEVICE.type == 'cuda'),
+    )
+    if num_workers > 0:
+        prefetch = 1 if batch_size >= 512 or num_workers >= 6 else 2
+        loader_kwargs.update(dict(
+            persistent_workers=(num_workers <= 4),
+            prefetch_factor=prefetch,
+            worker_init_fn=worker_init_fn_factory(seed),
+        ))
+    return DataLoader(
+        torch.utils.data.Subset(full_ds, subset_idx),
+        **loader_kwargs,
+    )
+
+
+def _run_combined_pass(model_with_head, model_backbone, loader):
+    """Single data pass: extract both logits and pooled features."""
+    all_logits = []
+    all_feats = []
+    batch_statuses = []
+    with torch.no_grad():
+        for imgs, _ in loader:
+            imgs = imgs.to(DEVICE, non_blocking=True)
+            l_out, status = get_robust_logits(model_with_head(imgs))
+            batch_statuses.append(status)
+            if l_out is not None:
+                all_logits.append(l_out.cpu().numpy())
+            f_out = get_pooled_features(model_backbone(imgs))
+            all_feats.append(f_out.cpu().numpy())
+    return all_feats, all_logits, batch_statuses
+
+
+def _run_with_batch_retry(infer_fn, initial_batch_size, min_batch_size=8):
+    """Run inference; on CUDA OOM halve batch size and retry."""
+    batch_size = initial_batch_size
+    last_exc = None
+    while batch_size >= min_batch_size:
+        try:
+            return infer_fn(batch_size), batch_size
+        except RuntimeError as exc:
+            last_exc = exc
+            if not _is_cuda_oom(exc):
+                raise
+            if batch_size <= min_batch_size:
+                break
+            next_bs = max(min_batch_size, batch_size // 2)
+            print(f"  [OOM] Retrying with batch_size={next_bs} (was {batch_size})")
+            batch_size = next_bs
+            _release_cuda_memory()
+    _release_cuda_memory()
+    raise CudaOomExhaustedError(
+        f"CUDA OOM persisted at batch_size={batch_size} (min={min_batch_size})"
+    ) from last_exc
+
+
+def _infer_combined_pass(model_with_head, model_backbone, full_ds, subset_idx,
+                         num_workers, seed):
+    def infer_fn(batch_size):
+        loader = _build_benchmark_dataloader(full_ds, subset_idx, batch_size, num_workers, seed)
+        try:
+            return _run_combined_pass(model_with_head, model_backbone, loader)
+        finally:
+            del loader
+
+    return infer_fn
+
+
 # =============================================================================
 # 5) SINGLE-SEED BENCHMARK
 # =============================================================================
@@ -393,52 +677,52 @@ def run_single_seed_benchmark(dataset_name, seed, batch_size=64, num_workers=4):
 
     results = []
     leep_status_counts = {}
+    n_oom_skipped = 0
+
+    def _make_oom_skip_row(model_name):
+        return {
+            "Model": model_name,
+            "Dataset": dataset_name,
+            "Seed": seed,
+            "LEEP_Real": np.nan,
+            "LEEP_Status": "oom_skip",
+            "Logits_C": np.nan,
+            "Had_Any_Ok_Batches": False,
+            "LogME": np.nan,
+            "SHESHA_Var": np.nan,
+            "SHESHA_FS": np.nan,
+            "Dim": np.nan,
+            "N_Samples": n_samples,
+            "Subset_Hash": subset_hash,
+            "Inference_Batch_Size": np.nan,
+        }
 
     for m_name in tqdm(model_names, desc=f"{dataset_name}/seed{seed}"):
+        tqdm.write(f"  -> {m_name}")
+        model_l = None
+        model_f = None
+        full_ds = None
         try:
             model_l = timm.create_model(m_name, pretrained=True).to(DEVICE).eval()
-            model_f = timm.create_model(m_name, pretrained=True, num_classes=0).to(DEVICE).eval()
-
             config_data = timm.data.resolve_data_config({}, model=model_l)
             transform = timm.data.create_transform(**config_data, is_training=False)
-
             full_ds, _ = get_dataset(dataset_name, transform, split='test')
+            model_f = timm.create_model(m_name, pretrained=True, num_classes=0).to(DEVICE).eval()
 
-            loader_kwargs = dict(
-                batch_size=batch_size,
-                shuffle=False,
-                num_workers=num_workers,
-                pin_memory=(DEVICE.type == 'cuda'),
-            )
-            if num_workers > 0:
-                loader_kwargs.update(dict(
-                    persistent_workers=True,
-                    prefetch_factor=2,
-                    worker_init_fn=worker_init_fn_factory(seed),
-                ))
-
-            loader = DataLoader(
-                torch.utils.data.Subset(full_ds, subset_idx),
-                **loader_kwargs
+            (all_feats, all_logits, batch_statuses), infer_bs = _run_with_batch_retry(
+                _infer_combined_pass(
+                    model_l, model_f, full_ds, subset_idx, num_workers, seed,
+                ),
+                batch_size,
             )
 
-            all_feats, all_logits = [], []
-            batch_statuses = []
-
-            with torch.no_grad():
-                for imgs, _ in loader:
-                    imgs = imgs.to(DEVICE, non_blocking=True)
-
-                    l_out, status = get_robust_logits(model_l(imgs))
-                    f_out = get_pooled_features(model_f(imgs))
-
-                    all_feats.append(f_out.cpu().numpy())
-                    batch_statuses.append(status)
-                    if l_out is not None:
-                        all_logits.append(l_out.cpu().numpy())
+            del model_l, model_f, full_ds
+            model_l = model_f = full_ds = None
+            _release_cuda_memory()
 
             X = np.concatenate(all_feats)
             L = np.concatenate(all_logits) if all_logits else None
+            del all_feats, all_logits
 
             had_any_ok = 'ok' in batch_statuses
 
@@ -475,18 +759,39 @@ def run_single_seed_benchmark(dataset_name, seed, batch_size=64, num_workers=4):
                 "Dim": X.shape[1],
                 "N_Samples": n_samples,
                 "Subset_Hash": subset_hash,
+                "Inference_Batch_Size": infer_bs,
             })
 
-            del model_l, model_f, X, L
-            torch.cuda.empty_cache()
+            del X, L
+
+        except CudaOomExhaustedError as e:
+            print(f"  [OOM] Skipping {m_name}: {e}")
+            n_oom_skipped += 1
+            leep_status_counts["oom_skip"] = leep_status_counts.get("oom_skip", 0) + 1
+            results.append(_make_oom_skip_row(m_name))
+            del model_l, model_f, full_ds
+            _release_cuda_memory()
+
+        except RuntimeError as e:
+            if _is_cuda_oom(e):
+                print(f"  [OOM] Skipping {m_name}: {e}")
+                n_oom_skipped += 1
+                leep_status_counts["oom_skip"] = leep_status_counts.get("oom_skip", 0) + 1
+                results.append(_make_oom_skip_row(m_name))
+            else:
+                print(f"Error {m_name}: {e}")
+            del model_l, model_f, full_ds
+            _release_cuda_memory()
 
         except Exception as e:
             print(f"Error {m_name}: {e}")
-            torch.cuda.empty_cache()
+            del model_l, model_f, full_ds
+            _release_cuda_memory()
 
     df = pd.DataFrame(results)
 
-    print(f"\nSeed {seed} Complete: {len(results)}/{len(model_names)} models")
+    print(f"\nSeed {seed} Complete: {len(results)}/{len(model_names)} models"
+          f" ({n_oom_skipped} OOM-skipped)")
     print(f"  LEEP status breakdown:")
     for status, count in sorted(leep_status_counts.items()):
         print(f"    {status}: {count}")
@@ -604,28 +909,11 @@ def run_all_datasets(seeds=SEEDS, datasets=None, batch_size=64, num_workers=4):
 # =============================================================================
 
 if __name__ == "__main__":
-    # USAGE EXAMPLES
-    # 1. Run single dataset with single seed:
-    # df = run_single_seed_benchmark('cifar100', seed=320)
-
-    # 2. Run single dataset with multiple seeds:
-    # per_seed_dfs, df_avg = run_multi_seed_benchmark('cifar10', seeds=[320, 1991, 9])
-
-    # 3. Run all datasets with all seeds:
-    # all_results = run_all_datasets(seeds=[320, 1991, 9])
-
-    # 4. Run specific datasets:
-    # all_results = run_all_datasets(
-    #     seeds=[320, 1991, 9],
-    #     datasets=['cifar10', 'cifar100', 'flowers102']
-    # )
-
-
     all_results = run_all_datasets(
-        seeds=[320],
+        seeds=SEEDS,
         datasets=['cifar10', 'cifar100', 'flowers102', 'dtd', 'eurosat', 'pets'],
-        batch_size=256,
-        num_workers=4
+        batch_size=DEFAULT_BATCH_SIZE,
+        num_workers=4,
     )
 
 

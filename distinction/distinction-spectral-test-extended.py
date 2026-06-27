@@ -52,7 +52,7 @@ N_SPLITS = 50           # Number of splits for stability metrics
 RANDOM_SEED = 320        # For reproducibility
 
 # Output directory
-OUTPUT_DIR = Path("./shesha-distinction")
+OUTPUT_DIR = Path(__file__).resolve().parent / "shesha-distinction"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # =============================================================================

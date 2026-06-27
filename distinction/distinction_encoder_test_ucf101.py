@@ -1,16 +1,21 @@
 """
-Shesha Distinction - Encoder Test (7 Domains)
+Shesha Distinction - Encoder Test (7 Domains) — UCF-101 Video
 Domains:
 1. Language (SST-2) - 4 models
 2. Vision (CIFAR-100) - 4 models
 3. Audio (LibriSpeech) - 2 models
-4. Video (Real Video) - 4 models
+4. Video (UCF-101) - 4 models
 5. Neuroscience (Steinmetz) - All sessions
 6. Protein (Swiss-Prot) - Multiple encoders
 7. Molecular (PBMC3k) - Multiple encoders
 
 Metric: FEATURE-SPLIT SHESHA (Internal Geometric Consistency)
 Scale: 15 SEEDS
+
+Video data loading is tiered:
+  Tier 1 — UCF-101 .avi files already on disk at UCF101_ROOT
+  Tier 2 — torchvision.datasets.UCF101 (downloads annotation splits only)
+  Tier 3 — synthetic colour-coded clips (always works, smoke-test only)
 """
 
 
@@ -73,6 +78,97 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 OUTDIR = Path(__file__).resolve().parent / "shesha-distinction"
 OUTDIR.mkdir(parents=True, exist_ok=True)
 
+# ---------------------------------------------------------------------------
+# UCF-101 paths — edit if your data lives elsewhere
+# ---------------------------------------------------------------------------
+UCF101_ROOT     = "./data/UCF101/UCF-101"          # folder of class sub-dirs
+ANNOTATION_PATH = "./data/UCF101/ucfTrainTestlist"  # annotation split folder
+
+# ---------------------------------------------------------------------------
+# UCF-101 auto-download
+# ---------------------------------------------------------------------------
+def _auto_download_ucf101():
+    """
+    Attempt to download UCF-101 automatically.
+
+    Strategy (in order):
+      1. kaggle-hub  — pulls from Kaggle dataset 'matthewjansen/ucf101-action-recognition'
+      2. opendatalab — huggingface mirror (rar, needs unrar/p7zip)
+      3. Print clear manual instructions and return False.
+
+    Returns True if UCF-101 is now available at UCF101_ROOT, else False.
+    """
+    import shutil, subprocess as _sp
+
+    dst = Path(UCF101_ROOT)
+    if dst.exists() and any(dst.rglob("*.avi")):
+        return True  # already present
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+
+    # --- Strategy 1: kaggle-hub ---
+    try:
+        import kagglehub                                        # pip install kagglehub
+        path = kagglehub.dataset_download(
+            "matthewjansen/ucf101-action-recognition"
+        )
+        # kagglehub returns the cache path; locate the UCF-101 root inside it
+        found = list(Path(path).rglob("UCF-101"))
+        if not found:
+            found = [p.parent for p in Path(path).rglob("*.avi")]
+        if found:
+            src = found[0]
+            if not dst.exists():
+                shutil.copytree(str(src), str(dst))
+            print(f"    [UCF-101] Downloaded via kagglehub → {dst}")
+            return True
+    except Exception as e:
+        print(f"    [UCF-101] kagglehub failed ({e})")
+
+    # --- Strategy 2: direct RAR from CRCV (needs curl + unrar/p7zip) ---
+    rar_path = dst.parent / "UCF101.rar"
+    try:
+        if not rar_path.exists():
+            result = _sp.run(
+                ["curl", "--insecure", "-L", "--progress-bar",
+                 "https://www.crcv.ucf.edu/data/UCF101/UCF101.rar",
+                 "-o", str(rar_path)],
+                check=True,
+            )
+        # Try unrar, then 7z
+        for cmd in [
+            ["unrar", "x", "-y", str(rar_path), str(dst.parent)],
+            ["7z",    "x", f"-o{dst.parent}", str(rar_path), "-y"],
+            ["unar",  "-o", str(dst.parent), str(rar_path)],
+        ]:
+            if shutil.which(cmd[0]):
+                _sp.run(cmd, check=True)
+                if dst.exists() and any(dst.rglob("*.avi")):
+                    print(f"    [UCF-101] Extracted via {cmd[0]} → {dst}")
+                    return True
+    except Exception as e:
+        print(f"    [UCF-101] CRCV RAR strategy failed ({e})")
+
+    # --- Nothing worked: print instructions ---
+    print(
+        "\n" + "=" * 60 +
+        "\n  UCF-101 AUTO-DOWNLOAD FAILED\n"
+        "  To use real UCF-101 videos, do ONE of the following:\n\n"
+        "  Option A — Kaggle:\n"
+        "    pip install kagglehub\n"
+        "    import kagglehub\n"
+        "    kagglehub.dataset_download('matthewjansen/ucf101-action-recognition')\n\n"
+        "  Option B — Manual download:\n"
+        "    Place UCF101.rar under ./data/UCF101/, then extract with unrar or 7z.\n\n"
+        "  After extraction set UCF101_ROOT to the folder that contains\n"
+        "  sub-directories like 'ApplyEyeMakeup', 'Archery', etc.\n"
+        "  (default: ./data/UCF101/UCF-101)\n" +
+        "=" * 60 + "\n"
+        "  Continuing with SYNTHETIC clips for now.\n" +
+        "=" * 60
+    )
+    return False
+
 
 # FULL 15 SEEDS
 SEEDS = [320, 1991, 9, 7258, 7, 2222, 724, 3, 12, 108, 18, 11, 1754, 411, 103]
@@ -87,9 +183,66 @@ CONFIG = {
     'molecular': {'n_cells': 1000},
 }
 
+# Number of bootstrap resamples for confidence intervals
+N_BOOTSTRAP = 10_000
+
 # =============================================================================
 # METRICS
 # =============================================================================
+
+def bootstrap_ci(values, n_boot=N_BOOTSTRAP, alpha=0.05, statistic=np.mean, rng_seed=0):
+    """
+    Non-parametric bootstrap confidence interval.
+
+    Parameters
+    ----------
+    values   : array-like of floats
+    n_boot   : int   — number of bootstrap resamples (default 10 000)
+    alpha    : float — two-tailed alpha level (default 0.05 → 95 % CI)
+    statistic: callable applied to each resample (default np.mean)
+    rng_seed : int
+
+    Returns
+    -------
+    (estimate, ci_low, ci_high)
+    """
+    vals = np.asarray(values, dtype=float)
+    vals = vals[np.isfinite(vals)]
+    if len(vals) == 0:
+        return (np.nan, np.nan, np.nan)
+    rng = np.random.default_rng(rng_seed)
+    boot_stats = np.array([
+        statistic(rng.choice(vals, size=len(vals), replace=True))
+        for _ in range(n_boot)
+    ])
+    lo = np.percentile(boot_stats, 100 * alpha / 2)
+    hi = np.percentile(boot_stats, 100 * (1 - alpha / 2))
+    return (float(statistic(vals)), float(lo), float(hi))
+
+
+def bootstrap_ci_rho(x, y, n_boot=N_BOOTSTRAP, alpha=0.05, rng_seed=0):
+    """Bootstrap CI for Spearman rho between two paired arrays."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    mask = np.isfinite(x) & np.isfinite(y)
+    x, y = x[mask], y[mask]
+    if len(x) < 5:
+        return (np.nan, np.nan, np.nan)
+    rng = np.random.default_rng(rng_seed)
+    boot_rhos = []
+    for _ in range(n_boot):
+        idx = rng.choice(len(x), size=len(x), replace=True)
+        rho, _ = spearmanr(x[idx], y[idx])
+        if np.isfinite(rho):
+            boot_rhos.append(rho)
+    if not boot_rhos:
+        return (np.nan, np.nan, np.nan)
+    boot_rhos = np.array(boot_rhos)
+    lo = np.percentile(boot_rhos, 100 * alpha / 2)
+    hi = np.percentile(boot_rhos, 100 * (1 - alpha / 2))
+    point_rho, point_p = spearmanr(x, y)
+    return (float(point_rho), float(lo), float(hi))
+
 
 def compute_shesha_features(X, n_splits=30, random_state=None):
     """Feature-split Shesha on GPU."""
@@ -304,6 +457,7 @@ def run_encoder_analysis(base_embeddings, seed, domain_name):
 
 def _load_sst2_texts(n_samples):
     """Load SST-2 sentences, trying multiple dataset paths for compatibility."""
+    # Try new canonical HF path first
     for dataset_id, config_name, split in [
         ("stanfordnlp/sst2",  None,   "validation"),
         ("glue",              "sst2", "validation"),
@@ -318,6 +472,7 @@ def _load_sst2_texts(n_samples):
             return list(ds[col])[:n_samples]
         except Exception:
             continue
+    # Last resort: a small set of hard-coded sentences so the domain never fails
     print("    [WARN] SST-2 download failed — using built-in fallback sentences.")
     return [
         "a great film", "terrible acting", "loved every minute",
@@ -407,7 +562,11 @@ def run_language_domain():
 # =============================================================================
 
 def _load_cifar100_pil(n_images):
-    """Load CIFAR-100 images as PIL, no torchvision required."""
+    """
+    Load CIFAR-100 images as PIL, no torchvision required.
+    Uses HuggingFace datasets (cifar100) with a numpy/pickle fallback.
+    Returns list of PIL Images (224×224 RGB).
+    """
     pil_images = []
     try:
         ds = load_dataset("uoft-cs/cifar100", split="test", trust_remote_code=True)
@@ -420,24 +579,32 @@ def _load_cifar100_pil(n_images):
         return pil_images
     except Exception as e:
         print(f"    [WARN] HF cifar100 load failed ({e}) — trying direct download...")
+
+    # Fallback: download CIFAR-100 binary directly
     try:
-        import pickle, urllib.request, tarfile as _tf
+        import pickle, urllib.request, gzip
         url = "https://www.cs.toronto.edu/~kriz/cifar-100-python.tar.gz"
         data_dir = Path(__file__).resolve().parent / "data"
         data_dir.mkdir(parents=True, exist_ok=True)
         tar_path = data_dir / "cifar100.tar.gz"
         if not tar_path.exists():
             urllib.request.urlretrieve(url, tar_path)
-        with _tf.open(tar_path) as tf:
-            f = tf.extractfile(tf.getmember("cifar-100-python/test"))
+        import tarfile
+        with tarfile.open(tar_path) as tf:
+            member = tf.getmember("cifar-100-python/test")
+            f = tf.extractfile(member)
             data = pickle.load(f, encoding="bytes")
         imgs = data[b"data"].reshape(-1, 3, 32, 32).transpose(0, 2, 3, 1)
         indices = np.linspace(0, len(imgs) - 1, n_images, dtype=int)
         for i in indices:
-            pil_images.append(Image.fromarray(imgs[i]).resize((224, 224)).convert("RGB"))
+            pil_images.append(
+                Image.fromarray(imgs[i]).resize((224, 224)).convert("RGB")
+            )
         return pil_images
     except Exception as e2:
-        print(f"    [WARN] Direct CIFAR-100 download failed ({e2}) — using noise images.")
+        print(f"    [WARN] Direct CIFAR-100 download also failed ({e2}) — using noise images.")
+
+    # Last resort: random noise images
     rng = np.random.default_rng(320)
     for _ in range(n_images):
         arr = rng.integers(0, 256, (224, 224, 3), dtype=np.uint8)
@@ -463,9 +630,9 @@ def run_vision_domain():
     print("=" * 60)
 
     try:
-        n_images   = CONFIG['vision']['n_images']
+        n_images = CONFIG['vision']['n_images']
         pil_images = _load_cifar100_pil(n_images)
-        batch      = _pil_batch_to_tensor(pil_images).to(DEVICE)
+        batch = _pil_batch_to_tensor(pil_images).to(DEVICE)
         print(f"  Loaded {len(pil_images)} images  batch={tuple(batch.shape)}")
 
         base_embeddings = {}
@@ -651,47 +818,192 @@ def run_audio_domain():
 
 
 # =============================================================================
+# DOMAIN 4: VIDEO UTILITIES (UCF-101 tiered loader + fixed extractors)
+# =============================================================================
+
+def _find_ucf_videos(root: str):
+    root = Path(root)
+    videos = []
+    for ext in ("*.avi", "*.mp4", "*.AVI", "*.MP4"):
+        videos.extend(root.rglob(ext))
+    return sorted(videos)
+
+
+def _pil_to_tensor_manual(img, size: int = 224):
+    """PIL → normalised (3,H,W) float32 tensor, no torchvision required."""
+    img = img.resize((size, size)).convert("RGB")
+    arr = np.array(img, dtype=np.float32) / 255.0
+    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+    std  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+    arr  = (arr - mean) / std
+    return torch.from_numpy(arr.transpose(2, 0, 1))
+
+
+def _read_clip(video_path: str, n_frames: int, size: int):
+    """Decode n_frames uniformly from a video. Uses decord if available."""
+    try:
+        import decord as _decord
+        vr = _decord.VideoReader(video_path, width=size, height=size)
+        total = len(vr)
+        if total < n_frames:
+            return None
+        idx = np.linspace(0, total - 1, n_frames, dtype=int)
+        batch = vr.get_batch(idx)
+        return [Image.fromarray(batch[i].numpy()) for i in range(n_frames)]
+    except Exception:
+        pass
+    try:
+        from torchvision.io import read_video
+        vframes, _, _ = read_video(video_path, pts_unit="sec")
+        if len(vframes) < n_frames:
+            return None
+        idx = np.linspace(0, len(vframes) - 1, n_frames, dtype=int)
+        return [Image.fromarray(vframes[i].numpy()).resize((size, size)) for i in idx]
+    except Exception:
+        return None
+
+
+def _load_ucf101_from_disk(n_videos, frames_per_clip, size, seed):
+    video_files = _find_ucf_videos(UCF101_ROOT)
+    if not video_files:
+        return None
+    rng = np.random.default_rng(seed)
+    class_dirs   = sorted({p.parent.name for p in video_files})
+    class_to_idx = {c: i for i, c in enumerate(class_dirs)}
+    chosen       = [video_files[i] for i in
+                    rng.choice(len(video_files), min(n_videos, len(video_files)), replace=False)]
+    clips, labels = [], []
+    for vpath in chosen:
+        try:
+            frames = _read_clip(str(vpath), frames_per_clip, size)
+            if frames and len(frames) == frames_per_clip:
+                clips.append(frames)
+                labels.append(class_to_idx[vpath.parent.name])
+        except Exception:
+            pass
+    return (clips, labels) if clips else None
+
+
+def _load_ucf101_torchvision(n_videos, frames_per_clip, size, seed):
+    try:
+        import torchvision.datasets as tvd
+        ann = Path(ANNOTATION_PATH)
+        if not ann.exists():
+            ann.mkdir(parents=True, exist_ok=True)
+            import urllib.request, zipfile
+            url = ("https://www.crcv.ucf.edu/data/UCF101/"
+                   "UCF101TrainTestSplits-RecognitionTask.zip")
+            zp = ann / "splits.zip"
+            urllib.request.urlretrieve(url, zp)
+            with zipfile.ZipFile(zp) as zf:
+                zf.extractall(ann.parent)
+            zp.unlink()
+        ds = tvd.UCF101(
+            root=str(Path(UCF101_ROOT).parent),
+            annotation_path=str(ann),
+            frames_per_clip=frames_per_clip,
+            step_between_clips=1,
+            fold=1, train=False, transform=None,
+        )
+        rng  = np.random.default_rng(seed)
+        idxs = rng.choice(len(ds), min(n_videos, len(ds)), replace=False)
+        clips, labels = [], []
+        for i in idxs:
+            try:
+                video, _, label = ds[int(i)]
+                frames = [
+                    Image.fromarray(video[j].numpy()).resize((size, size))
+                    for j in np.linspace(0, len(video) - 1, frames_per_clip, dtype=int)
+                ]
+                clips.append(frames)
+                labels.append(int(label))
+            except Exception:
+                pass
+        return (clips, labels) if clips else None
+    except Exception:
+        return None
+
+
+def _load_synthetic_clips(n_videos, frames_per_clip, size, seed, n_classes=10):
+    print("    [Video] No UCF-101 found — using synthetic colour clips (smoke-test mode).")
+    rng     = np.random.default_rng(seed)
+    colours = rng.integers(0, 256, (n_classes, 3), dtype=np.uint8)
+    clips, labels = [], []
+    for i in range(n_videos):
+        label  = i % n_classes
+        colour = colours[label]
+        frames = []
+        for _ in range(frames_per_clip):
+            noise = rng.integers(0, 60, (size, size, 3), dtype=np.uint8)
+            arr   = np.clip(colour.reshape(1, 1, 3) + noise, 0, 255).astype(np.uint8)
+            frames.append(Image.fromarray(arr))
+        clips.append(frames)
+        labels.append(label)
+    return clips, labels
+
+
+def _load_video_clips(n_videos, frames_per_clip, size, seed):
+    """Tiered loader: disk → auto-download → torchvision → synthetic."""
+    # Tier 1: already on disk
+    result = _load_ucf101_from_disk(n_videos, frames_per_clip, size, seed)
+    if result:
+        clips, labels = result
+        print(f"    [Video] Loaded {len(clips)} UCF-101 clips from disk.")
+        return clips, labels
+
+    # Tier 2: try to download automatically, then retry from disk
+    print("    [Video] UCF-101 not found on disk — attempting auto-download...")
+    if _auto_download_ucf101():
+        result = _load_ucf101_from_disk(n_videos, frames_per_clip, size, seed)
+        if result:
+            clips, labels = result
+            print(f"    [Video] Loaded {len(clips)} UCF-101 clips after download.")
+            return clips, labels
+
+    # Tier 3: torchvision UCF101 (if installed)
+    result = _load_ucf101_torchvision(n_videos, frames_per_clip, size, seed)
+    if result:
+        clips, labels = result
+        print(f"    [Video] Loaded {len(clips)} UCF-101 clips via torchvision.")
+        return clips, labels
+
+    return _load_synthetic_clips(n_videos, frames_per_clip, size, seed)
+
+
+# =============================================================================
 # DOMAIN 4: VIDEO (4 Models)
 # =============================================================================
 
 def run_video_domain():
     print("\n" + "=" * 60)
-    print("DOMAIN 4: VIDEO (4 Models)")
+    print("DOMAIN 4: VIDEO (UCF-101, 4 Models)")
     print("=" * 60)
-    
-    import decord
-    
-    data_dir = Path(__file__).resolve().parent / "data" / "video"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    video_path = data_dir / "video_sample.mp4"
-    if not video_path.exists():
-        print("    Downloading sample video...")
-        r = requests.get("https://test-videos.co.uk/vids/jellyfish/mp4/h264/360/Jellyfish_360_10s_1MB.mp4")
-        with open(video_path, 'wb') as f:
-            f.write(r.content)
-    
-    vr = decord.VideoReader(video_path)
-    total_frames = len(vr)
-    print(f"  Video loaded: {total_frames} frames")
-    
-    videos = []
-    n_videos = CONFIG['video']['n_videos']
-    
-    for i in range(n_videos):
-        start = np.random.randint(0, max(1, total_frames - 16))
-        idx = np.arange(start, start + 16)
-        frames = vr.get_batch(idx).asnumpy()
-        videos.append([Image.fromarray(f).resize((224, 224)) for f in frames])
-    
-    print(f"  Extracted {len(videos)} video segments")
+
+    n_videos       = CONFIG['video']['n_videos']
+    frames_per_clip = CONFIG['video']['frames_per_video']
+    video_size     = CONFIG['video']['video_size']
+
+    # ------------------------------------------------------------------
+    # Load clips: disk → torchvision UCF101 → synthetic fallback
+    # ------------------------------------------------------------------
+    try:
+        videos, _labels = _load_video_clips(
+            n_videos, frames_per_clip, video_size, seed=SEEDS[0]
+        )
+    except Exception as e:
+        print(f"  [ERROR] Video loading failed: {e}")
+        return []
+
+    print(f"  Loaded {len(videos)} clips")
     base_embeddings = {}
-    
-    # Model 1: TimeSformer
+
+    # ------------------------------------------------------------------
+    # Model 1: TimeSformer — uses VideoMAEImageProcessor (no torchvision)
+    # ------------------------------------------------------------------
     try:
         print("    Loading TimeSformer...")
-        proc = AutoImageProcessor.from_pretrained("facebook/timesformer-base-finetuned-k400")
+        proc  = VideoMAEImageProcessor.from_pretrained("facebook/timesformer-base-finetuned-k400")
         model = AutoModel.from_pretrained("facebook/timesformer-base-finetuned-k400").to(DEVICE).eval()
-        
         feats = []
         for v in videos:
             inp = proc(images=v[:8], return_tensors="pt")
@@ -699,19 +1011,19 @@ def run_video_domain():
             with torch.no_grad():
                 out = model(**inp)
             feats.append(out.last_hidden_state.mean(1).cpu().numpy())
-        
         base_embeddings['timesformer'] = np.vstack(feats)
         print(f"    timesformer: {base_embeddings['timesformer'].shape}")
         del model, proc
     except Exception as e:
         print(f"    [ERROR] TimeSformer: {e}")
-    
+
+    # ------------------------------------------------------------------
     # Model 2: VideoMAE
+    # ------------------------------------------------------------------
     try:
         print("    Loading VideoMAE...")
-        proc = VideoMAEImageProcessor.from_pretrained("MCG-NJU/videomae-base")
+        proc  = VideoMAEImageProcessor.from_pretrained("MCG-NJU/videomae-base")
         model = VideoMAEModel.from_pretrained("MCG-NJU/videomae-base").to(DEVICE).eval()
-        
         feats = []
         for v in videos:
             inp = proc(images=v[:16], return_tensors="pt")
@@ -719,76 +1031,82 @@ def run_video_domain():
             with torch.no_grad():
                 out = model(**inp)
             feats.append(out.last_hidden_state.mean(1).cpu().numpy())
-        
         base_embeddings['videomae'] = np.vstack(feats)
         print(f"    videomae: {base_embeddings['videomae'].shape}")
         del model, proc
     except Exception as e:
         print(f"    [ERROR] VideoMAE: {e}")
-    
-    # Model 3: ViT on mean frame
+
+    # ------------------------------------------------------------------
+    # Model 3: ViT-B/16 on temporal mean frame (no torchvision)
+    # ------------------------------------------------------------------
     try:
         print("    Loading ViT (mean frame)...")
-        from torchvision.transforms import ToTensor, Normalize, Compose, Resize
-        
         model = AutoModel.from_pretrained("google/vit-base-patch16-224").to(DEVICE).eval()
-        transform = Compose([
-            Resize((224, 224)),
-            ToTensor(),
-            Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
-        
+        try:
+            from transformers import AutoFeatureExtractor
+            vit_proc = AutoFeatureExtractor.from_pretrained("google/vit-base-patch16-224")
+            use_proc = True
+        except Exception:
+            use_proc = False
+
         feats = []
         for v in videos:
-            frames_np = np.stack([np.array(f) for f in v])
-            mean_frame = frames_np.mean(axis=0).astype(np.uint8)
-            mean_pil = Image.fromarray(mean_frame)
-            img_tensor = transform(mean_pil).unsqueeze(0).to(DEVICE)
-            
+            arr       = np.stack([np.array(f) for f in v]).mean(axis=0).astype(np.uint8)
+            mean_pil  = Image.fromarray(arr)
+            if use_proc:
+                inp = vit_proc(images=mean_pil, return_tensors="pt")
+                pixel_values = inp["pixel_values"].to(DEVICE)
+            else:
+                pixel_values = _pil_to_tensor_manual(mean_pil).unsqueeze(0).to(DEVICE)
             with torch.no_grad():
-                out = model(pixel_values=img_tensor)
+                out = model(pixel_values=pixel_values)
             feats.append(out.last_hidden_state[:, 0, :].cpu().numpy())
-        
         base_embeddings['vit_meanframe'] = np.vstack(feats)
         print(f"    vit_meanframe: {base_embeddings['vit_meanframe'].shape}")
         del model
     except Exception as e:
         print(f"    [ERROR] ViT mean frame: {e}")
-    
-    # Model 4: CLIP multi-frame
+
+    # ------------------------------------------------------------------
+    # Model 4: CLIP ViT-B/32 multi-frame
+    # ------------------------------------------------------------------
     try:
         print("    Loading CLIP (multi-frame)...")
         processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-        model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(DEVICE).eval()
-        
-        feats = []
+        model     = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(DEVICE).eval()
+        feats     = []
         for v in videos:
-            frame_indices = [0, 4, 8, 12] if len(v) >= 13 else list(range(min(4, len(v))))
+            fi = [0, 4, 8, 12] if len(v) >= 13 else list(range(min(4, len(v))))
             frame_embs = []
-            for fi in frame_indices:
-                inputs = processor(images=v[fi], return_tensors="pt")
+            for idx in fi:
+                inputs = processor(images=v[idx], return_tensors="pt")
                 inputs = {k: val.to(DEVICE) for k, val in inputs.items() if k != 'input_ids'}
                 with torch.no_grad():
-                    emb = model.get_image_features(**inputs)
+                    out = model.get_image_features(**inputs)
+                # handle both tensor and BaseModelOutputWithPooling
+                if isinstance(out, torch.Tensor):
+                    emb = out
+                else:
+                    emb = out.image_embeds if hasattr(out, "image_embeds") else out.pooler_output
                 frame_embs.append(emb.cpu().numpy())
             feats.append(np.mean(frame_embs, axis=0))
-        
         base_embeddings['clip_multiframe'] = np.vstack(feats)
         print(f"    clip_multiframe: {base_embeddings['clip_multiframe'].shape}")
         del model, processor
     except Exception as e:
         print(f"    [ERROR] CLIP multi-frame: {e}")
-    
+
     if DEVICE == "cuda":
         torch.cuda.empty_cache()
-    
+
     if not base_embeddings:
         return []
-    
+
     all_results = []
     for seed in tqdm(SEEDS, desc="  Seeds"):
         all_results.extend(run_encoder_analysis(base_embeddings, seed, "Video"))
-    
+
     return all_results
 
 
@@ -1198,41 +1516,77 @@ def main():
     }).reset_index()
     df_agg.to_csv(OUTDIR / "aggregated_by_encoder.csv", index=False)
     
-    # Summary
+    # Summary with bootstrap CIs
     print("\n" + "=" * 60)
     print("FINAL SUMMARY")
     print("=" * 60)
     print(f"\nTotal encoder configurations: {len(df_agg)}")
+    print(f"Bootstrap resamples: {N_BOOTSTRAP:,}  (95 % CI)")
     print(f"\nPer-domain counts:")
     print(df_agg.groupby('domain').size())
-    
-    print(f"\nPer-domain statistics and rho:")
+
+    print(f"\nPer-domain statistics (mean [95% CI]) and rho:")
     all_shesha = []
-    all_cka = []
-    
-    for domain in df_agg['domain'].unique():
-        d = df_agg[df_agg['domain'] == domain]
+    all_cka    = []
+
+    for domain in sorted(df_agg['domain'].unique()):
+        d     = df_agg[df_agg['domain'] == domain]
         valid = d.dropna(subset=['SHESHA', 'CKA'])
-        
+        if valid.empty:
+            print(f"\n{domain}: no valid results")
+            continue
+
+        s_est, s_lo, s_hi = bootstrap_ci(valid['SHESHA'].values)
+        c_est, c_lo, c_hi = bootstrap_ci(valid['CKA'].values)
+        r_est, r_lo, r_hi = bootstrap_ci_rho(valid['SHESHA'].values,
+                                              valid['CKA'].values)
+        _, pval = spearmanr(valid['SHESHA'], valid['CKA']) \
+                  if len(valid) >= 5 else (np.nan, np.nan)
+
         print(f"\n{domain} (N={len(valid)}):")
-        print(f"  SHESHA: {valid['SHESHA'].mean():.3f} +/- {valid['SHESHA'].std():.3f}")
-        print(f"  CKA:    {valid['CKA'].mean():.3f} +/- {valid['CKA'].std():.3f}")
-        
-        if len(valid) >= 5:
-            rho, pval = spearmanr(valid['SHESHA'], valid['CKA'])
-            print(f"  rho:    {rho:+.3f} (p={pval:.4f})")
-        
+        print(f"  SHESHA: {s_est:.4f}  95% CI [{s_lo:.4f}, {s_hi:.4f}]")
+        print(f"  CKA:    {c_est:.4f}  95% CI [{c_lo:.4f}, {c_hi:.4f}]")
+        if np.isfinite(r_est):
+            print(f"  rho:    {r_est:+.4f}  95% CI [{r_lo:+.4f}, {r_hi:+.4f}]"
+                  f"  (p={pval:.4f})")
+
         all_shesha.extend(valid['SHESHA'].tolist())
         all_cka.extend(valid['CKA'].tolist())
-    
-    # Aggregate
+
+    # Save per-domain CI table
+    ci_rows = []
+    for domain in sorted(df_agg['domain'].unique()):
+        d     = df_agg[df_agg['domain'] == domain]
+        valid = d.dropna(subset=['SHESHA', 'CKA'])
+        if valid.empty:
+            continue
+        s_est, s_lo, s_hi = bootstrap_ci(valid['SHESHA'].values)
+        c_est, c_lo, c_hi = bootstrap_ci(valid['CKA'].values)
+        r_est, r_lo, r_hi = bootstrap_ci_rho(valid['SHESHA'].values,
+                                              valid['CKA'].values)
+        _, pval = spearmanr(valid['SHESHA'], valid['CKA']) \
+                  if len(valid) >= 5 else (np.nan, np.nan)
+        ci_rows.append({
+            'domain': domain, 'N': len(valid),
+            'SHESHA_mean': s_est, 'SHESHA_ci_lo': s_lo, 'SHESHA_ci_hi': s_hi,
+            'CKA_mean':    c_est, 'CKA_ci_lo':    c_lo, 'CKA_ci_hi':    c_hi,
+            'rho':         r_est, 'rho_ci_lo':    r_lo, 'rho_ci_hi':    r_hi,
+            'rho_pval':    pval,  'n_bootstrap':  N_BOOTSTRAP,
+        })
+    if ci_rows:
+        pd.DataFrame(ci_rows).to_csv(OUTDIR / "bootstrap_ci_summary.csv", index=False)
+        print(f"\nBootstrap CI table saved → {OUTDIR / 'bootstrap_ci_summary.csv'}")
+
+    # Aggregate across all domains
     print("\n" + "-" * 60)
-    print("AGGREGATE:")
+    print("AGGREGATE (all domains):")
     if len(all_shesha) >= 5:
-        rho_agg, pval_agg = spearmanr(all_shesha, all_cka)
-        print(f"  N = {len(all_shesha)}")
-        print(f"  rho = {rho_agg:+.4f} (p={pval_agg:.4f})")
-    
+        r_est, r_lo, r_hi = bootstrap_ci_rho(all_shesha, all_cka)
+        _, pval_agg = spearmanr(all_shesha, all_cka)
+        print(f"  N   = {len(all_shesha)}")
+        print(f"  rho = {r_est:+.4f}  95% CI [{r_lo:+.4f}, {r_hi:+.4f}]"
+              f"  (p={pval_agg:.4f})")
+
     print("\n" + "=" * 60)
     print("COMPLETE")
     print("=" * 60)

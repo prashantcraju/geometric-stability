@@ -6,3 +6,4 @@ timm
 scipy
 scikit-learn
 tqdm
+shesha-geometry

@@ -1,7 +1,14 @@
 numpy
 pandas
+# Install PyTorch separately with the correct CUDA wheel to avoid binary mismatch:
+#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 torch
 torchvision
-timm
+torchaudio
+timm>=1.0.0
 scipy
 tqdm
+transformers
+datasets
+sentence-transformers
+kagglehub

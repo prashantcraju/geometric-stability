@@ -10,7 +10,7 @@ import sys
 # 0) DETERMINISM GUARDS
 # =============================================================================
 SEED = 320
-# Internal env vars for Colab/local compatibility
+# Determinism environment variables
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
@@ -33,7 +33,7 @@ import torch
 # =============================================================================
 
 BATCH_SIZE = 128
-RESULTS_DIR = Path("./shesha-validation")
+RESULTS_DIR = Path(__file__).resolve().parent / "shesha-validation"
 EMBED_DIR = RESULTS_DIR / "embeds"
 REPORT_DIR = RESULTS_DIR / "shesha_reports_csv"
 

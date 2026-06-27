@@ -1,7 +1,0 @@
-numpy
-pandas
-torch
-scipy
-scikit-learn
-sentence-transformers
-datasets

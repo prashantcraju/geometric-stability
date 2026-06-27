@@ -13,7 +13,7 @@ import csv
 
 warnings.filterwarnings('ignore')
 
-OUTDIR = Path("./shesha-distinction")
+OUTDIR = Path(__file__).resolve().parent / "shesha-distinction"
 OUTDIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -80,6 +80,35 @@ def debiased_linear_cka(X, Y):
         return 0.0
     
     return hsic_xy / np.sqrt(hsic_xx * hsic_yy)
+
+
+def compute_cka(X: np.ndarray, Y: np.ndarray) -> float:
+    """
+    Standard (biased) linear CKA — matches compute_cka() in
+    distinction_encoder_test.py and spectral_cka_vs_shesha.py.
+
+      1. Center both representations (subtract column means)
+      2. Linear Gram matrices  K = X Xᵀ,  L = Y Yᵀ
+      3. Double-center via  H K H,  H L H
+      4. Return  tr(Kc Lc) / sqrt( tr(Kc²) · tr(Lc²) ),  clipped to [0, 1]
+    """
+    X = np.asarray(X, dtype=np.float64)
+    Y = np.asarray(Y, dtype=np.float64)
+
+    X = X - X.mean(axis=0)
+    Y = Y - Y.mean(axis=0)
+
+    n = X.shape[0]
+    K = X @ X.T
+    L = Y @ Y.T
+
+    H = np.eye(n) - np.ones((n, n)) / n
+    K = H @ K @ H
+    L = H @ L @ H
+
+    num = np.sum(K * L)
+    den = np.sqrt(np.sum(K * K) * np.sum(L * L)) + 1e-12
+    return float(np.clip(num / den, 0.0, 1.0))
 
 
 def split_half_shesha(X, n_splits=N_SPLITS, random_state=None):
@@ -241,7 +270,9 @@ def run_comprehensive_suite():
     save_to_csv('results_test2_bias.csv', ['Metric', 'Score'],
                 [['Shesha', shesha_d], ['Debiased_CKA', cka_debias]])
 
-    # --- TEST 3: SPECTRAL SENSITIVITY (The "Mic Drop") ---
+    # --- TEST 3: SPECTRAL SENSITIVITY ---
+    # CKA uses the standard biased estimator from distinction_encoder_test.py /
+    # spectral_cka_vs_shesha.py (centered Gram matrices, clipped to [0, 1]).
     print("\n[TEST 3] Spectral Sensitivity (PC Deletion)")
     print("-" * 50)
 
@@ -253,7 +284,7 @@ def run_comprehensive_suite():
     np.fill_diagonal(S, [100.0/(i+1) for i in range(min(n, d))])
     X_spec = U @ S @ V.T
 
-    removal_levels = [i for i in range(50)]
+    removal_levels = list(range(50))
     res_shesha = []
     res_cka = []
     results_t3 = []
@@ -261,30 +292,24 @@ def run_comprehensive_suite():
     pca = PCA(n_components=min(n, d), random_state=RANDOM_SEED)
     pca.fit(X_spec)
 
-    print(f"   {'PCs Removed':<12} {'Shesha':<10} {'Debiased CKA':<15}")
-    
-    # Compute transform once outside the loop for efficiency
+    print(f"   {'PCs Removed':<12} {'Shesha':<10} {'CKA':<10}")
+
     X_pca_full = pca.transform(X_spec)
-    
+
     for k in removal_levels:
         X_pca = X_pca_full.copy()
         X_pca[:, :k] = 0.0
         X_mod = pca.inverse_transform(X_pca)
 
-        # Use seed tied to this specific modified data
         s = split_half_shesha(X_mod, random_state=RANDOM_SEED + 200 + k)
-        c = debiased_linear_cka(X_spec, X_mod)
+        c = compute_cka(X_spec, X_mod)
         res_shesha.append(s)
         res_cka.append(c)
         results_t3.append([k, s, c])
         if k % 10 == 0 or k < 5:
-            print(f"   {k:<12} {s:<10.3f} {c:<15.3f}")
+            print(f"   {k:<12} {s:<10.3f} {c:<10.3f}")
 
-    save_to_csv('results_test3_spectral.csv', ['PCs_Removed', 'Shesha', 'Debiased_CKA'], results_t3)
-    
-    # NOTE: Debiased CKA can go negative - this is expected for an unbiased estimator
-    # when the true similarity is near zero. Negative values indicate no meaningful
-    # alignment rather than "anti-alignment".
+    save_to_csv('results_test3_spectral.csv', ['PCs_Removed', 'Shesha', 'CKA'], results_t3)
 
     # --- TEST 4: ORTHOGONALITY (Full Quadrant Sampling) ---
     print("\n[TEST 4] Cross-Metric Correlation (Orthogonality)")
@@ -395,7 +420,7 @@ def run_comprehensive_suite():
     # Plot Spectral Sensitivity
     plt.subplot(1, 2, 1)
     plt.plot(removal_levels, res_shesha, 'b-o', label='Shesha (Stability)', markersize=3)
-    plt.plot(removal_levels, res_cka, 'r-s', label='Debiased CKA (Similarity)', markersize=3)
+    plt.plot(removal_levels, res_cka, 'r-s', label='CKA (Similarity)', markersize=3)
     plt.xlabel('Top PCs Removed')
     plt.ylabel('Score')
     plt.title('Spectral Sensitivity (Tail Awareness)')
@@ -419,9 +444,10 @@ def run_comprehensive_suite():
     plt.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig('validation_final.png', dpi=150)
-    print(f"\n[Figure Saved] validation_final.png")
-    plt.show()
+    fig_path = OUTDIR / "validation_final.png"
+    plt.savefig(fig_path, dpi=150)
+    print(f"\n[Figure Saved] {fig_path}")
+    plt.close()
 
 
 if __name__ == "__main__":

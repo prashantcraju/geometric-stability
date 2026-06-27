@@ -26,7 +26,7 @@ warnings.filterwarnings("ignore")
 # =============================================================================
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-OUTDIR = Path("./shesha-distinction")
+OUTDIR = Path(__file__).resolve().parent / "shesha-distinction"
 OUTDIR.mkdir(parents=True, exist_ok=True)
 
 
